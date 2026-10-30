@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/testenv"
 )
@@ -152,6 +153,104 @@ func TestRegisterSchemeBindsAnOlderEntry(t *testing.T) {
 	if c, err := os.ReadFile(calls); err != nil || string(c) != "update-desktop-database\nxdg-mime\n" {
 		t.Fatalf("registered %q, want once (%v)", c, err)
 	}
+}
+
+// The icon is there (install.sh or an earlier start put it) after another
+// app built ~/.local/share/icons/hicolor/icon-theme.cache, which doesn't list
+// it. GTK trusts that cache, so the app grid drew a gear until it is rebuilt
+// or no longer trusted, with or without gtk-update-icon-cache installed.
+func TestInstallIconUnderAStaleCache(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		tool, cache  bool
+		installedNow bool
+	}{
+		{"cache older than the icon, tool installed", true, true, false},
+		{"cache older than the icon, no tool", false, true, false},
+		{"cache older than a fresh install, tool installed", true, true, true},
+		{"no cache", true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			data := filepath.Join(root, "data")
+			theme := filepath.Join(data, "icons", "hicolor")
+			icon := filepath.Join(theme, "256x256", "apps", "magpie.png")
+			cache := filepath.Join(theme, "icon-theme.cache")
+			bin := filepath.Join(root, "bin")
+			if err := os.MkdirAll(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			calls := filepath.Join(root, "calls")
+			t.Setenv("MAGPIE_SCHEME_TEST_CALLS", calls)
+			t.Setenv("PATH", bin)
+			if tc.tool { // lists every icon in the theme it is given, as the real one does
+				testenv.Program(t, filepath.Join(bin, "gtk-update-icon-cache"), "#!/bin/sh\n"+
+					"printf '%s\\n' \"$@\" >> \"$MAGPIE_SCHEME_TEST_CALLS\"\n"+
+					"for a; do theme=$a; done\n"+
+					"for f in \"$theme\"/*/apps/*.png; do n=${f##*/}; printf '%s\\0' \"${n%.png}\"; done > \"$theme/icon-theme.cache\"\n")
+			}
+			if err := os.MkdirAll(filepath.Dir(icon), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// another app's cache, an hour old; the icon came half an hour later
+			hour := time.Now().Add(-time.Hour)
+			if !tc.installedNow {
+				if err := os.WriteFile(icon, desktopIcon, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(icon, hour.Add(30*time.Minute), hour.Add(30*time.Minute)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.cache {
+				if err := os.WriteFile(cache, []byte("someapp\x00"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(cache, hour, hour); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chtimes(theme, hour, hour); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 { // the second start finds nothing left to do
+				if err := installIcon(data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !gtkFindsIcon(t, theme, "magpie") {
+				t.Fatal("GTK still reads a cache without magpie in it")
+			}
+			if !tc.cache {
+				if _, err := os.Stat(cache); !os.IsNotExist(err) {
+					t.Fatalf("a cache was made where there was none: %v", err)
+				}
+			}
+			got, _ := os.ReadFile(calls)
+			if n := strings.Count(string(got), theme+"\n"); n > 1 {
+				t.Fatalf("cache rebuilt %d times, want at most once: %q", n, got)
+			}
+		})
+	}
+}
+
+// gtkFindsIcon is GTK's own rule: a theme's icon-theme.cache is used while
+// it is no older than the theme's folder, and then only for what it lists.
+func gtkFindsIcon(t *testing.T, theme, name string) bool {
+	t.Helper()
+	c, err := os.Stat(filepath.Join(theme, "icon-theme.cache"))
+	if os.IsNotExist(err) {
+		return true
+	}
+	d, derr := os.Stat(theme)
+	if err != nil || derr != nil {
+		t.Fatal(err, derr)
+	}
+	if c.ModTime().Before(d.ModTime()) {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join(theme, "icon-theme.cache"))
+	return err == nil && bytes.Contains(b, []byte(name+"\x00"))
 }
 
 // WebKitGTK names its data folder after the program; a release run as

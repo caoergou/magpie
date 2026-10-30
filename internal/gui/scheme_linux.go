@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/proc"
@@ -74,21 +75,53 @@ Terminal=false
 }
 
 // installIcon puts magpie's icon where the entry's Icon=magpie is looked
-// up, the user's hicolor theme, unless the same picture is there already.
+// up, the user's hicolor theme, unless the same picture is there already,
+// and has an icon cache that doesn't list it rebuilt.
 func installIcon(data string) error {
-	dir := filepath.Join(data, "icons", "hicolor", "256x256", "apps")
+	theme := filepath.Join(data, "icons", "hicolor")
+	dir := filepath.Join(theme, "256x256", "apps")
 	path := filepath.Join(dir, "magpie.png")
-	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, desktopIcon) {
+	if old, err := os.ReadFile(path); err != nil || !bytes.Equal(old, desktopIcon) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		tmp := path + ".new"
+		if err := os.WriteFile(tmp, desktopIcon, 0o644); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return err
+		}
+	}
+	// an icon installed before this check came with a stale cache too
+	if iconCacheStale(theme, path) {
+		return refreshIconCache(theme)
+	}
+	return nil
+}
+
+// iconCacheStale: GTK trusts a theme's icon-theme.cache while it is newer
+// than the theme's own folder, and a file added to 256x256/apps doesn't
+// touch that folder. So with a cache another app built, the icon isn't
+// found and the app grid draws a gear.
+func iconCacheStale(theme, icon string) bool {
+	c, err := os.Stat(filepath.Join(theme, "icon-theme.cache"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false // no cache: GTK reads the folders
+	}
+	i, ierr := os.Stat(icon)
+	return err != nil || ierr != nil || c.ModTime().Before(i.ModTime())
+}
+
+// refreshIconCache makes GTK find an icon the theme's cache doesn't list:
+// the cache rebuilt, or without gtk-update-icon-cache (Fedora packs it
+// apart) the theme's folder made newer than it, so GTK reads the folders.
+func refreshIconCache(theme string) error {
+	if proc.Command("gtk-update-icon-cache", "-q", "-t", "-f", theme).Run() == nil {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".new"
-	if err := os.WriteFile(tmp, desktopIcon, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	now := time.Now()
+	return os.Chtimes(theme, now, now)
 }
 
 // keepWebData moves WebKitGTK's data (the pages' localStorage, which holds

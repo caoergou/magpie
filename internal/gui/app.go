@@ -52,6 +52,12 @@ var appIcon []byte // coloured, for Windows' tray
 //go:embed icon-1024.png
 var appIconLarge []byte
 
+// Linux's window icon (_NET_WM_ICON): GTK 3 on X11 drops one of 512px or
+// more without a word, and the 1024px one left the window with none (#2626).
+//
+//go:embed icon-256.png
+var appIconLinux []byte
+
 // appIconFor is the icon the app hands the system: none on a Mac whose
 // bundle has AppIcon.icon compiled in (Assets.car), whose Dock then draws
 // it light or dark as macOS 26 has it, where a picture set at run time
@@ -63,6 +69,9 @@ func appIconFor() []byte {
 				return nil
 			}
 		}
+	}
+	if runtime.GOOS == "linux" {
+		return appIconLinux
 	}
 	return appIconLarge
 }

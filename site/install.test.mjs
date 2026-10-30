@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const installer = fileURLToPath(new URL("./public/install.sh", import.meta.url));
 
-function install(t, { termux = true, arch = "aarch64", override = false, prefixOnly = false, missing = false, corrupt = false, desktop = false, github = false, args = [], env: extra = {}, tamper = "" } = {}) {
+function install(t, { termux = true, arch = "aarch64", override = false, prefixOnly = false, missing = false, corrupt = false, desktop = false, github = false, args = [], env: extra = {}, tamper = "", iconCache = "" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "magpie-install-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const tools = join(dir, "tools");
@@ -43,6 +43,18 @@ const tamper = process.env.INSTALL_TAMPER;
 if (url.endsWith("/api/latest")) process.stdout.write(process.env.INSTALL_FEED);
 else fs.writeFileSync(args[args.indexOf("-o") + 1], tamper && url.startsWith(tamper) ? "changed by the mirror" : process.env.INSTALL_PAYLOAD);
 `, { mode: 0o755 });
+  // "tool": an old cache and gtk-update-icon-cache; "fails": it can't rebuild
+  if (iconCache) {
+    const theme = join(dir, "share/icons/hicolor");
+    mkdirSync(theme, { recursive: true });
+    writeFileSync(join(theme, "icon-theme.cache"), "someapp\0");
+    const hour = new Date(Date.now() - 3600_000);
+    utimesSync(join(theme, "icon-theme.cache"), hour, hour);
+    utimesSync(theme, hour, hour);
+    writeFileSync(join(tools, "gtk-update-icon-cache"), iconCache === "fails"
+      ? "#!/bin/sh\nexit 1\n"
+      : `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(dir, "icon-cache-calls")}"\nprintf 'magpie\\0' > "$4/icon-theme.cache"\n`, { mode: 0o755 });
+  }
   const env = {
     ...process.env,
     HOME: home,
@@ -65,7 +77,7 @@ else fs.writeFileSync(args[args.indexOf("-o") + 1], tamper && url.startsWith(tam
   const result = spawnSync("sh", [installer, ...args], { env, encoding: "utf8" });
   const read = (p) => (existsSync(p) ? readFileSync(p, "utf8") : "");
   const calls = read(env.INSTALL_ARGS).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  return { ...result, bin, file, payload, share: env.XDG_DATA_HOME, requests: read(requests), calls };
+  return { ...result, bin, file, payload, share: env.XDG_DATA_HOME, requests: read(requests), calls, iconCacheCalls: read(join(dir, "icon-cache-calls")) };
 }
 
 test("Termux downloads Android arm64 into PREFIX/bin even with WebKit installed", (t) => {
@@ -117,6 +129,26 @@ test("ordinary Linux still selects its CLI or desktop build", (t) => {
     // the dock binds the window (app_id/WM_CLASS "magpie") to the entry (#2626)
     if (desktop) assert.match(readFileSync(join(r.share, "applications/magpie.desktop"), "utf8"), /^StartupWMClass=magpie$/m);
   }
+});
+
+// An icon cache another app built doesn't list magpie, and GTK trusts it
+// while it is no older than the theme's folder, so the app grid drew a gear.
+test("an icon cache that doesn't list magpie is rebuilt, or no longer trusted", (t) => {
+  const r = install(t, { termux: false, desktop: true, iconCache: "tool" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.iconCacheCalls, `-q -t -f ${join(r.share, "icons/hicolor")}\n`);
+  assert.equal(readFileSync(join(r.share, "icons/hicolor/icon-theme.cache"), "utf8"), "magpie\0");
+
+  const f = install(t, { termux: false, desktop: true, iconCache: "fails" });
+  assert.equal(f.status, 0, f.stderr);
+  const theme = join(f.share, "icons/hicolor");
+  assert.ok(statSync(join(theme, "icon-theme.cache")).mtimeMs < statSync(theme).mtimeMs, "GTK still trusts the old cache");
+});
+
+test("no icon cache is made where there was none", (t) => {
+  const r = install(t, { termux: false, desktop: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(join(r.share, "icons/hicolor/icon-theme.cache")), false);
 });
 
 // akic404 on Discord: installing without a way round the firewall. A proxy

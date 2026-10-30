@@ -131,6 +131,11 @@ else
     share="${XDG_DATA_HOME:-$HOME/.local/share}"
     mkdir -p "$share/applications" "$share/icons/hicolor/256x256/apps"
     get -o "$share/icons/hicolor/256x256/apps/magpie.png" "$site/img/icon-256.png" || true
+    # GTK trusts an icon cache another app built, which doesn't list magpie:
+    # rebuild it, or make the theme newer than it so the folders are read
+    if [ -f "$share/icons/hicolor/icon-theme.cache" ]; then
+      gtk-update-icon-cache -q -t -f "$share/icons/hicolor" 2>/dev/null || touch "$share/icons/hicolor" || true
+    fi
     cat > "$share/applications/magpie.desktop" <<EOF
 [Desktop Entry]
 Type=Application
